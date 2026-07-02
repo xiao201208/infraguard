@@ -103,9 +103,9 @@ func init() {
 
 	// Flag descriptions - using English as default since init runs before language detection
 	policyUpdateCmd.Flags().StringVar(&policyRepo, "repo", policy.DefaultRepo,
-		"Git repository URL or path")
-	policyUpdateCmd.Flags().StringVar(&policyVersion, "version", "main",
-		"Git branch, tag, or commit to download")
+		"Git repository URL or path; empty uses the default OSS policy archive")
+	policyUpdateCmd.Flags().StringVar(&policyVersion, "version", policy.DefaultPolicyVersion,
+		"Policy version to download; latest reads the OSS version file, or main when --repo is set")
 
 	// Format command flags
 	policyFormatCmd.Flags().BoolVarP(&formatWrite, "write", "w", false,
@@ -121,7 +121,14 @@ func init() {
 func runPolicyUpdate(cmd *cobra.Command, args []string) error {
 	msg := i18n.Msg()
 
-	fmt.Printf(msg.PolicyUpdate.Progress+"\n", policyRepo, policyVersion)
+	source := policyRepo
+	version := policyVersion
+	if strings.TrimSpace(source) == "" {
+		source = "OSS"
+	} else if strings.TrimSpace(version) == "" || version == policy.DefaultPolicyVersion {
+		version = policy.DefaultPolicyGitRef
+	}
+	fmt.Printf(msg.PolicyUpdate.Progress+"\n", source, version)
 
 	pm := policy.NewManager(policy.DefaultPolicyDir())
 	if err := pm.Update(policyRepo, policyVersion); err != nil {

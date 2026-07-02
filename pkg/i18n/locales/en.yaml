@@ -41,18 +41,20 @@ policy:
 
 # Policy update command
 policy_update:
-  short: "Download/update policy library from repository"
+  short: "Download/update policy library"
   long: |
-    Download the policy library from a Git repository.
-    The policies/ subdirectory will be downloaded and stored locally.
+    Download the policy library from the default OSS release mirror.
+    The downloaded policies are stored locally and override embedded policies.
+    If the OSS policy archive is missing for a historical version, InfraGuard falls back to the GitHub repository.
 
-    Supported repository formats:
+    Use --repo only when downloading from a custom Git repository.
+    Supported repository formats for --repo:
       - host/path (e.g., github.com/aliyun/infraguard)
       - HTTPS URL (e.g., https://github.com/aliyun/infraguard.git)
       - SSH URL (e.g., ssh://git@github.com/aliyun/infraguard.git)
       - SCP-like (e.g., git@github.com:aliyun/infraguard.git)
-  repo_flag: "Git repository URL or path"
-  version_flag: "Git branch, tag, or commit to download"
+  repo_flag: "Git repository URL or path; empty uses the default OSS policy archive"
+  version_flag: "Policy version to download; latest reads the OSS version file, or main when --repo is set"
   progress: "Updating policies from %s (version: %s)..."
   success: "Policies updated successfully."
 
@@ -197,7 +199,8 @@ update:
   short: "Update InfraGuard CLI to the latest version"
   long: |
     Update InfraGuard CLI to the latest version or a specific version.
-    Downloads and installs the binary from GitHub Releases.
+    Downloads and installs the binary from the OSS release mirror.
+    If the OSS archive is missing, InfraGuard falls back to the matching GitHub release asset.
 
     Examples:
       infraguard update              # Update to latest version
@@ -229,7 +232,7 @@ update:
     permission_denied: "Permission denied. Try running with sudo or install to a user-writable location."
     unsupported_platform: "Unsupported platform: %s/%s"
     network_error: "Network error: %v. Please check your internet connection."
-    rate_limit: "GitHub API rate limit exceeded. Please try again later."
+    rate_limit: "Download service rate limit exceeded. Please try again later."
 
 # Config command
 config:
@@ -660,4 +663,3 @@ waiver:
     invalid_expires: "invalid expires date %q (want YYYY-MM-DD)"
     expired: "waiver expired on %s"
     permanent: "permanent waiver (no expires date)"
-

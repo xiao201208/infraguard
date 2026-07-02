@@ -41,18 +41,20 @@ policy:
 
 # Commande policy update
 policy_update:
-  short: "Télécharger/mettre à jour la bibliothèque de politiques depuis le dépôt"
+  short: "Télécharger/mettre à jour la bibliothèque de politiques"
   long: |
-    Télécharger la bibliothèque de politiques depuis un dépôt Git.
-    Le sous-répertoire policies/ sera téléchargé et stocké localement.
+    Télécharger la bibliothèque de politiques depuis le miroir de releases OSS par défaut.
+    Les politiques téléchargées sont stockées localement et remplacent les politiques embarquées.
+    Si l'archive de politiques OSS manque pour une version historique, InfraGuard se replie sur le dépôt GitHub.
 
-    Formats de dépôt pris en charge:
+    Utilisez --repo uniquement pour télécharger depuis un dépôt Git personnalisé.
+    Formats de dépôt pris en charge pour --repo:
       - hôte/chemin (ex., github.com/aliyun/infraguard)
       - URL HTTPS (ex., https://github.com/aliyun/infraguard.git)
       - URL SSH (ex., ssh://git@github.com/aliyun/infraguard.git)
       - Type SCP (ex., git@github.com:aliyun/infraguard.git)
-  repo_flag: "URL ou chemin du dépôt Git"
-  version_flag: "Branche, tag ou commit Git à télécharger"
+  repo_flag: "URL ou chemin du dépôt Git; vide utilise l'archive de politiques OSS par défaut"
+  version_flag: "Version de politiques à télécharger; latest lit le fichier de version OSS, ou main lorsque --repo est défini"
   progress: "Mise à jour des politiques depuis %s (version: %s)..."
   success: "Politiques mises à jour avec succès."
 
@@ -197,7 +199,8 @@ update:
   short: "Mettre à jour InfraGuard CLI vers la dernière version"
   long: |
     Mettre à jour InfraGuard CLI vers la dernière version ou une version spécifique.
-    Télécharge et installe le binaire depuis GitHub Releases.
+    Télécharge et installe le binaire depuis le miroir de releases OSS.
+    Si l'archive OSS manque, InfraGuard se replie sur l'asset GitHub Release correspondant.
 
     Exemples:
       infraguard update              # Mettre à jour vers la dernière version
@@ -229,7 +232,7 @@ update:
     permission_denied: "Permission refusée. Essayez d'exécuter avec sudo ou d'installer dans un emplacement accessible en écriture par l'utilisateur."
     unsupported_platform: "Plateforme non prise en charge: %s/%s"
     network_error: "Erreur réseau: %v. Veuillez vérifier votre connexion Internet."
-    rate_limit: "Limite de taux de l'API GitHub dépassée. Veuillez réessayer plus tard."
+    rate_limit: "Limite de taux du service de téléchargement dépassée. Veuillez réessayer plus tard."
 
 # Commande config
 config:

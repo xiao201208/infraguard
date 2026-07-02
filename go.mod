@@ -1,24 +1,25 @@
 module github.com/aliyun/infraguard
 
-go 1.26
+go 1.24.6
 
 require (
 	github.com/Xuanwo/go-locale v1.1.2
 	github.com/alibabacloud-go/darabonba-openapi/v2 v2.1.14
 	github.com/alibabacloud-go/ros-20190910/v4 v4.4.0
 	github.com/alibabacloud-go/tea v1.4.0
-	github.com/creachadair/jrpc2 v1.3.5
+	github.com/creachadair/jrpc2 v1.3.3
 	github.com/fatih/color v1.18.0
 	github.com/goccy/go-yaml v1.19.2
 	github.com/hashicorp/go-getter v1.8.3
 	github.com/hashicorp/go-version v1.6.0
 	github.com/hashicorp/hcl/v2 v2.24.0
-	github.com/kaptinlin/jsonrepair v0.2.17
+	github.com/kaptinlin/jsonrepair v0.2.2
 	github.com/olekukonko/tablewriter v1.1.4
 	github.com/open-policy-agent/opa v1.12.1
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2
 	github.com/smartystreets/goconvey v1.8.1
 	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.10
 	github.com/zclconf/go-cty v1.16.3
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -61,11 +62,10 @@ require (
 	github.com/clbanning/mxj/v2 v2.7.0 // indirect
 	github.com/clipperhouse/displaywidth v0.10.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.6.0 // indirect
-	github.com/creachadair/mds v0.26.1 // indirect
+	github.com/creachadair/mds v0.25.4 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
-	github.com/go-json-experiment/json v0.0.0-20251027170946-4849db3c2f7e // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gobwas/glob v0.2.3 // indirect
@@ -109,7 +109,6 @@ require (
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/sirupsen/logrus v1.9.4-0.20230606125235-dd1b4c2e81af // indirect
 	github.com/smarty/assertions v1.15.0 // indirect
-	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/tchap/go-patricia/v2 v2.3.3 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect

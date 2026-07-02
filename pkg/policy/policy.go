@@ -2,19 +2,40 @@
 package policy
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/aliyun/infraguard/pkg/i18n"
 	"github.com/aliyun/infraguard/pkg/models"
 	"github.com/hashicorp/go-getter"
 )
 
-// DefaultRepo is the default policy repository.
-const DefaultRepo = "github.com/aliyun/infraguard"
+const (
+	// DefaultRepo is empty so policy update defaults to the OSS policy archive.
+	DefaultRepo = ""
+	// DefaultPolicyVersion reads the latest policy version from the OSS version file.
+	DefaultPolicyVersion = "latest"
+	// DefaultPolicyGitRef is used when --repo is set without an explicit version.
+	DefaultPolicyGitRef      = "main"
+	defaultPolicyBaseURL     = "https://ros-public-tools.oss-cn-beijing.aliyuncs.com/github-releases/aliyun/infraguard/"
+	defaultPolicyGitRepo     = "github.com/aliyun/infraguard"
+	policyBaseURLEnv         = "INFRAGUARD_POLICY_BASE_URL"
+	policyGitRepoEnv         = "INFRAGUARD_POLICY_GITHUB_REPO"
+	policyDownloadTimeout    = 5 * time.Minute
+	maxPolicyArchiveEntry    = 20 << 20
+	maxPolicyArchiveTotal    = 500 << 20
+	policyArchiveNamePattern = "infraguard-policies-%s.tar.gz"
+)
 
 // DefaultPolicyDir returns the default user-level policy storage directory (~/.infraguard/policies).
 func DefaultPolicyDir() string {
@@ -258,35 +279,435 @@ func NewManager(policyDir string) *Manager {
 	return &Manager{policyDir: policyDir}
 }
 
-// Update downloads and updates the policy library from a repository.
-// It uses "single-version overwrite" strategy: clears existing policies before download.
+// Update downloads and updates the policy library.
+// When repo is empty, it uses the default OSS policy archive. Otherwise it keeps
+// backward-compatible git repository support.
 func (m *Manager) Update(repo, version string) error {
+	if strings.TrimSpace(repo) == "" {
+		return m.UpdateFromOSS(version)
+	}
+	if isLatestPolicyVersion(version) {
+		version = DefaultPolicyGitRef
+	}
+	return m.updateFromGit(repo, version)
+}
+
+func (m *Manager) updateFromGit(repo, version string) error {
+	return m.updateFromGitFirstAvailable(repo, []string{version})
+}
+
+func (m *Manager) updateFromGitFirstAvailable(repo string, refs []string) error {
 	msg := i18n.Msg()
-	// Clean existing policies (single-version overwrite)
-	if err := os.RemoveAll(m.policyDir); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf(msg.Errors.CleanPolicyDirectory, err)
+	if len(refs) == 0 {
+		refs = []string{DefaultPolicyGitRef}
 	}
 
-	// Ensure parent directory exists
-	if err := os.MkdirAll(m.policyDir, 0755); err != nil {
-		return fmt.Errorf(msg.Errors.CreatePolicyDirectory, err)
+	var lastErr error
+	for _, ref := range refs {
+		tmpRoot, err := os.MkdirTemp("", "infraguard-policy-git-*")
+		if err != nil {
+			return fmt.Errorf(msg.Errors.CreatePolicyDirectory, err)
+		}
+
+		stagingDir := filepath.Join(tmpRoot, "policies")
+		if err := downloadPoliciesFromGit(repo, ref, stagingDir); err != nil {
+			lastErr = err
+			_ = os.RemoveAll(tmpRoot)
+			continue
+		}
+
+		err = replacePolicyDir(stagingDir, m.policyDir)
+		_ = os.RemoveAll(tmpRoot)
+		if err != nil {
+			return fmt.Errorf(msg.Errors.DownloadPolicies, err)
+		}
+		return nil
 	}
 
-	// Build go-getter URL
+	return fmt.Errorf(msg.Errors.DownloadPolicies, lastErr)
+}
+
+func downloadPoliciesFromGit(repo, version, dst string) error {
 	getterURL := buildGetterURL(repo, version)
-
-	// Download using go-getter
 	client := &getter.Client{
 		Src:  getterURL,
-		Dst:  m.policyDir,
+		Dst:  dst,
 		Mode: getter.ClientModeDir,
 	}
+	return client.Get()
+}
 
-	if err := client.Get(); err != nil {
+// UpdateFromOSS downloads a versioned policy archive from OSS and atomically
+// replaces the local policy directory only after download and extraction succeed.
+func (m *Manager) UpdateFromOSS(version string) error {
+	msg := i18n.Msg()
+
+	resolvedVersion, err := resolvePolicyVersion(version)
+	if err != nil {
+		if isFallbackHTTPError(err) && isLatestPolicyVersion(version) {
+			return m.updateFromGitFirstAvailable(resolvePolicyGitRepo(), []string{DefaultPolicyGitRef})
+		}
 		return fmt.Errorf(msg.Errors.DownloadPolicies, err)
 	}
 
+	tmpRoot, err := os.MkdirTemp("", "infraguard-policy-update-*")
+	if err != nil {
+		return fmt.Errorf(msg.Errors.CreatePolicyDirectory, err)
+	}
+	defer os.RemoveAll(tmpRoot)
+
+	archivePath := filepath.Join(tmpRoot, fmt.Sprintf(policyArchiveNamePattern, resolvedVersion))
+	archiveURL := fmt.Sprintf("%s%s/%s", resolvePolicyBaseURL(), resolvedVersion, filepath.Base(archivePath))
+	if err := downloadFile(archiveURL, archivePath); err != nil {
+		if isFallbackHTTPError(err) {
+			return m.updateFromGitFirstAvailable(resolvePolicyGitRepo(), policyGitRefCandidates(resolvedVersion))
+		}
+		return fmt.Errorf(msg.Errors.DownloadPolicies, err)
+	}
+
+	extractDir := filepath.Join(tmpRoot, "extract")
+	if err := extractPolicyArchive(archivePath, extractDir); err != nil {
+		return fmt.Errorf(msg.Errors.DownloadPolicies, err)
+	}
+
+	sourceDir, err := archiveRootDir(extractDir)
+	if err != nil {
+		return fmt.Errorf(msg.Errors.DownloadPolicies, err)
+	}
+
+	if err := replacePolicyDir(sourceDir, m.policyDir); err != nil {
+		return fmt.Errorf(msg.Errors.DownloadPolicies, err)
+	}
 	return nil
+}
+
+func resolvePolicyVersion(version string) (string, error) {
+	version = strings.TrimSpace(version)
+	if version != "" && version != DefaultPolicyVersion {
+		return strings.TrimPrefix(version, "v"), nil
+	}
+
+	url := resolvePolicyBaseURL() + "version.txt"
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Get(url)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", httpStatusError{URL: url, StatusCode: resp.StatusCode}
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read version file: %w", err)
+	}
+	resolved := strings.TrimSpace(string(body))
+	if resolved == "" {
+		return "", fmt.Errorf("version file is empty")
+	}
+	return strings.TrimPrefix(resolved, "v"), nil
+}
+
+func isLatestPolicyVersion(version string) bool {
+	version = strings.TrimSpace(version)
+	return version == "" || version == DefaultPolicyVersion
+}
+
+func downloadFile(url, dst string) error {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := (&http.Client{Timeout: policyDownloadTimeout}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return httpStatusError{URL: url, StatusCode: resp.StatusCode}
+	}
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+func extractPolicyArchive(src, dst string) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer gr.Close()
+
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		return err
+	}
+
+	tr := tar.NewReader(gr)
+	var totalSize int64
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		cleanName, err := sanitizeArchivePath(hdr.Name)
+		if err != nil || cleanName == "" {
+			continue
+		}
+		localName, err := archiveLocalPath(cleanName)
+		if err != nil {
+			continue
+		}
+
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(filepath.Join(dst, localName), 0755); err != nil {
+				return err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if hdr.Size < 0 || hdr.Size > maxPolicyArchiveEntry {
+				return fmt.Errorf("archive entry %s exceeds maximum size", cleanName)
+			}
+			totalSize += hdr.Size
+			if totalSize > maxPolicyArchiveTotal {
+				return fmt.Errorf("archive exceeds maximum extracted size")
+			}
+			filePath := filepath.Join(dst, localName)
+			if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+				return err
+			}
+			mode := hdr.FileInfo().Mode().Perm()
+			if mode == 0 {
+				mode = 0600
+			}
+			out, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return err
+			}
+			written, copyErr := io.Copy(out, io.LimitReader(tr, maxPolicyArchiveEntry+1))
+			closeErr := out.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			if written > maxPolicyArchiveEntry {
+				return fmt.Errorf("archive entry %s exceeds maximum size", cleanName)
+			}
+		}
+	}
+	return nil
+}
+
+func archiveRootDir(extractDir string) (string, error) {
+	entries, err := os.ReadDir(extractDir)
+	if err != nil {
+		return "", err
+	}
+	if len(entries) == 0 {
+		return "", fmt.Errorf("policy archive is empty")
+	}
+	if len(entries) == 1 && entries[0].IsDir() {
+		return filepath.Join(extractDir, entries[0].Name()), nil
+	}
+	return extractDir, nil
+}
+
+func replacePolicyDir(sourceDir, policyDir string) error {
+	if err := os.MkdirAll(filepath.Dir(policyDir), 0755); err != nil {
+		return err
+	}
+	stagedDir := policyDir + ".new"
+	backupDir := policyDir + ".old"
+	_ = os.RemoveAll(stagedDir)
+	_ = os.RemoveAll(backupDir)
+
+	if err := os.Rename(sourceDir, stagedDir); err != nil {
+		if err := copyDir(sourceDir, stagedDir); err != nil {
+			_ = os.RemoveAll(stagedDir)
+			return err
+		}
+	}
+
+	hasExisting := dirExists(policyDir)
+	if hasExisting {
+		if err := os.Rename(policyDir, backupDir); err != nil {
+			_ = os.RemoveAll(stagedDir)
+			return err
+		}
+	}
+	if err := os.Rename(stagedDir, policyDir); err != nil {
+		_ = os.RemoveAll(policyDir)
+		if hasExisting {
+			_ = os.Rename(backupDir, policyDir)
+		}
+		_ = os.RemoveAll(stagedDir)
+		return err
+	}
+	if hasExisting {
+		_ = os.RemoveAll(backupDir)
+	}
+	return nil
+}
+
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return err
+		}
+		in, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+		if err != nil {
+			in.Close()
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			in.Close()
+			out.Close()
+			return err
+		}
+		if err := in.Close(); err != nil {
+			out.Close()
+			return err
+		}
+		return out.Close()
+	})
+}
+
+func sanitizeArchivePath(name string) (string, error) {
+	if name == "" || strings.ContainsRune(name, '\x00') {
+		return "", fmt.Errorf("invalid archive path")
+	}
+	name = strings.ReplaceAll(name, "\\", "/")
+	for strings.HasPrefix(name, "./") {
+		name = strings.TrimPrefix(name, "./")
+	}
+	if strings.HasPrefix(name, "/") || strings.HasPrefix(name, "//") {
+		return "", fmt.Errorf("absolute archive path is not allowed")
+	}
+	if len(name) >= 2 && ((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) && name[1] == ':' {
+		return "", fmt.Errorf("windows drive archive path is not allowed")
+	}
+	clean := path.Clean(name)
+	if clean == "." {
+		return "", nil
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("path traversal is not allowed")
+	}
+	return clean, nil
+}
+
+func archiveLocalPath(cleanRel string) (string, error) {
+	localRel, err := filepath.Localize(cleanRel)
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsLocal(localRel) {
+		return "", fmt.Errorf("path is not local")
+	}
+	return localRel, nil
+}
+
+func resolvePolicyBaseURL() string {
+	baseURL := strings.TrimSpace(os.Getenv(policyBaseURLEnv))
+	if baseURL == "" {
+		baseURL = defaultPolicyBaseURL
+	}
+	if !strings.HasSuffix(baseURL, "/") {
+		baseURL += "/"
+	}
+	return baseURL
+}
+
+func resolvePolicyGitRepo() string {
+	repo := strings.TrimSpace(os.Getenv(policyGitRepoEnv))
+	if repo == "" {
+		return defaultPolicyGitRepo
+	}
+	return repo
+}
+
+func policyGitRefCandidates(version string) []string {
+	version = strings.TrimSpace(version)
+	if version == "" || version == DefaultPolicyVersion {
+		return []string{DefaultPolicyGitRef}
+	}
+	if strings.Contains(version, "/") {
+		return []string{version}
+	}
+
+	trimmedV := strings.TrimPrefix(version, "v")
+	candidates := []string{version}
+	if version == trimmedV {
+		candidates = append(candidates, "v"+trimmedV)
+	} else {
+		candidates = append(candidates, trimmedV)
+	}
+	candidates = append(candidates, "cli/v"+trimmedV)
+
+	seen := make(map[string]struct{}, len(candidates))
+	unique := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		unique = append(unique, candidate)
+	}
+	return unique
+}
+
+type httpStatusError struct {
+	URL        string
+	StatusCode int
+}
+
+func (e httpStatusError) Error() string {
+	return fmt.Sprintf("%s returned status %d", e.URL, e.StatusCode)
+}
+
+func isFallbackHTTPError(err error) bool {
+	var statusErr httpStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.StatusCode == http.StatusNotFound || statusErr.StatusCode == http.StatusForbidden
 }
 
 // Clean removes the policy directory and all its contents.
@@ -326,6 +747,9 @@ func buildGetterURL(repo, version string) string {
 	case strings.HasPrefix(repo, "https://"):
 		// HTTPS URL
 		baseURL = strings.TrimSuffix(repo, ".git")
+	case strings.HasPrefix(repo, "file://"):
+		// Local file URL, used by tests and local mirrors.
+		baseURL = repo
 	case strings.HasPrefix(repo, "ssh://"):
 		// SSH URL - keep as is
 		baseURL = strings.TrimSuffix(repo, ".git")
@@ -341,7 +765,10 @@ func buildGetterURL(repo, version string) string {
 	}
 
 	// Build go-getter git subdirectory URL
-	return fmt.Sprintf("git::%s.git//policies?ref=%s", baseURL, version)
+	if !strings.HasPrefix(baseURL, "file://") && !strings.HasSuffix(baseURL, ".git") {
+		baseURL += ".git"
+	}
+	return fmt.Sprintf("git::%s//policies?ref=%s", baseURL, version)
 }
 
 // ValidatePath checks if a policy path exists and is valid.

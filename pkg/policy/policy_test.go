@@ -1,14 +1,25 @@
 package policy
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/aliyun/infraguard/pkg/models"
 	. "github.com/smartystreets/goconvey/convey"
 )
+
+func normalizeTestNewlines(data []byte) string {
+	return strings.ReplaceAll(string(data), "\r\n", "\n")
+}
 
 func TestDefaultPolicyDir(t *testing.T) {
 	Convey("Given the DefaultPolicyDir function", t, func() {
@@ -179,6 +190,12 @@ func TestBuildGetterURL(t *testing.T) {
 				version:  "develop",
 				expected: "git::ssh://git@github.com/aliyun/infraguard.git//policies?ref=develop",
 			},
+			{
+				name:     "file URL",
+				repo:     "file:///tmp/infraguard-policy-repo",
+				version:  "cli/v1.2.3",
+				expected: "git::file:///tmp/infraguard-policy-repo//policies?ref=cli/v1.2.3",
+			},
 		}
 
 		for _, tc := range tests {
@@ -222,6 +239,99 @@ func TestManagerUpdate(t *testing.T) {
 
 			Convey("It should return an error", func() {
 				So(err, ShouldNotBeNil)
+			})
+		})
+
+		Convey("When updating a custom repository with the default policy version", func() {
+			repoDir := initPolicyGitRepo(t, "cli/v1.2.3", map[string]string{
+				"policies/aliyun/rules/from-main.rego": "package infraguard.rules.aliyun.from_main\n",
+			})
+			defer os.RemoveAll(repoDir)
+
+			err := manager.Update("file://"+repoDir, DefaultPolicyVersion)
+
+			Convey("It should keep the historical custom repository default of main", func() {
+				So(err, ShouldBeNil)
+				data, readErr := os.ReadFile(filepath.Join(tmpDir, "aliyun", "rules", "from-main.rego"))
+				So(readErr, ShouldBeNil)
+				So(normalizeTestNewlines(data), ShouldEqual, "package infraguard.rules.aliyun.from_main\n")
+			})
+		})
+	})
+}
+
+func TestManagerUpdateFromOSS(t *testing.T) {
+	Convey("Given a Manager using the default OSS policy source", t, func() {
+		tmpDir, err := os.MkdirTemp("", "policy-oss-update-test")
+		So(err, ShouldBeNil)
+		defer os.RemoveAll(tmpDir)
+
+		Convey("When updating a specific version", func() {
+			archive := buildPolicyTarGz(t, map[string]string{
+				"policies/aliyun/rules/demo.rego": "package infraguard.rules.aliyun.demo\n",
+			})
+			var gotPath string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				_, _ = w.Write(archive)
+			}))
+			defer server.Close()
+			t.Setenv("INFRAGUARD_POLICY_BASE_URL", server.URL+"/")
+
+			manager := NewManager(tmpDir)
+			err := manager.Update("", "1.2.3")
+
+			Convey("It should install the extracted policy contents", func() {
+				So(err, ShouldBeNil)
+				So(gotPath, ShouldEqual, "/1.2.3/infraguard-policies-1.2.3.tar.gz")
+				data, readErr := os.ReadFile(filepath.Join(tmpDir, "aliyun", "rules", "demo.rego"))
+				So(readErr, ShouldBeNil)
+				So(string(data), ShouldEqual, "package infraguard.rules.aliyun.demo\n")
+			})
+		})
+
+		Convey("When the OSS archive cannot be downloaded", func() {
+			oldPolicy := filepath.Join(tmpDir, "aliyun", "rules", "old.rego")
+			err := os.MkdirAll(filepath.Dir(oldPolicy), 0755)
+			So(err, ShouldBeNil)
+			err = os.WriteFile(oldPolicy, []byte("old"), 0644)
+			So(err, ShouldBeNil)
+
+			server := httptest.NewServer(http.NotFoundHandler())
+			defer server.Close()
+			t.Setenv("INFRAGUARD_POLICY_BASE_URL", server.URL+"/")
+			t.Setenv("INFRAGUARD_POLICY_GITHUB_REPO", "file:///nonexistent/path")
+
+			manager := NewManager(tmpDir)
+			err = manager.Update("", "1.2.3")
+
+			Convey("It should keep the existing policy directory intact", func() {
+				So(err, ShouldNotBeNil)
+				data, readErr := os.ReadFile(oldPolicy)
+				So(readErr, ShouldBeNil)
+				So(string(data), ShouldEqual, "old")
+			})
+		})
+
+		Convey("When the OSS archive is missing for a historical version", func() {
+			repoDir := initPolicyGitRepo(t, "cli/v1.2.3", map[string]string{
+				"policies/aliyun/rules/from-git.rego": "package infraguard.rules.aliyun.from_git\n",
+			})
+			defer os.RemoveAll(repoDir)
+			t.Setenv("INFRAGUARD_POLICY_GITHUB_REPO", "file://"+repoDir)
+
+			server := httptest.NewServer(http.NotFoundHandler())
+			defer server.Close()
+			t.Setenv("INFRAGUARD_POLICY_BASE_URL", server.URL+"/")
+
+			manager := NewManager(tmpDir)
+			err := manager.Update("", "1.2.3")
+
+			Convey("It should fall back to the GitHub policy source and try the CLI tag", func() {
+				So(err, ShouldBeNil)
+				data, readErr := os.ReadFile(filepath.Join(tmpDir, "aliyun", "rules", "from-git.rego"))
+				So(readErr, ShouldBeNil)
+				So(normalizeTestNewlines(data), ShouldEqual, "package infraguard.rules.aliyun.from_git\n")
 			})
 		})
 	})
@@ -354,6 +464,71 @@ func TestLoaderMatchRules(t *testing.T) {
 			})
 		})
 	})
+}
+
+func buildPolicyTarGz(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, body := range files {
+		header := &tar.Header{
+			Name: name,
+			Mode: 0644,
+			Size: int64(len(body)),
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatalf("write tar body: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func initPolicyGitRepo(t *testing.T, tag string, files map[string]string) string {
+	t.Helper()
+
+	repoDir, err := os.MkdirTemp("", "policy-git-repo-*.git")
+	if err != nil {
+		t.Fatalf("create git repo dir: %v", err)
+	}
+	runGit(t, repoDir, "init")
+	runGit(t, repoDir, "config", "user.email", "test@example.com")
+	runGit(t, repoDir, "config", "user.name", "Test User")
+	runGit(t, repoDir, "checkout", "-b", "main")
+
+	for name, body := range files {
+		path := filepath.Join(repoDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("create policy dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+			t.Fatalf("write policy file: %v", err)
+		}
+	}
+	runGit(t, repoDir, "add", ".")
+	runGit(t, repoDir, "commit", "-m", "add policies")
+	runGit(t, repoDir, "tag", tag)
+	return repoDir
+}
+
+func runGit(t *testing.T, repoDir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = repoDir
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, output)
+	}
 }
 
 func TestLoaderMatchPacks(t *testing.T) {

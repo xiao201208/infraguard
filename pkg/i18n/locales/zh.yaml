@@ -40,18 +40,20 @@ policy:
 
 # Policy update command
 policy_update:
-  short: "从仓库下载/更新策略库"
+  short: "下载/更新策略库"
   long: |
-    从 Git 仓库下载策略库。
-    policies/ 子目录将被下载并存储到本地。
+    从默认 OSS 发布镜像下载策略库。
+    下载的策略会存储在本地，并优先于内置策略。
+    如果历史版本的 OSS 策略包不存在，会回退到 GitHub 仓库下载。
 
-    支持的仓库格式：
+    仅在需要自定义 Git 仓库时使用 --repo。
+    --repo 支持的仓库格式：
       - host/path（例如 github.com/aliyun/infraguard）
       - HTTPS URL（例如 https://github.com/aliyun/infraguard.git）
       - SSH URL（例如 ssh://git@github.com/aliyun/infraguard.git）
       - SCP 格式（例如 git@github.com:aliyun/infraguard.git）
-  repo_flag: "Git 仓库 URL 或路径"
-  version_flag: "Git 分支、标签或提交"
+  repo_flag: "Git 仓库 URL 或路径；留空时使用默认 OSS 策略包"
+  version_flag: "要下载的策略版本；latest 会读取 OSS 版本文件；设置 --repo 时默认为 main"
   progress: "正在从 %s 更新策略（版本：%s）..."
   success: "策略更新成功。"
 
@@ -196,7 +198,8 @@ update:
   short: "更新 InfraGuard CLI 到最新版本"
   long: |
     将 InfraGuard CLI 更新到最新版本或指定版本。
-    从 GitHub Releases 下载并安装二进制文件。
+    从 OSS 发布镜像下载并安装二进制文件。
+    如果 OSS 包不存在，会回退到匹配的 GitHub Release 资产。
 
     示例：
       infraguard update              # 更新到最新版本
@@ -228,7 +231,7 @@ update:
     permission_denied: "权限被拒绝。请尝试使用 sudo 运行或安装到用户可写的位置。"
     unsupported_platform: "不支持的平台：%s/%s"
     network_error: "网络错误：%v。请检查您的网络连接。"
-    rate_limit: "GitHub API 速率限制已超出。请稍后再试。"
+    rate_limit: "下载服务速率限制已超出。请稍后再试。"
 
 # Config command
 config:
@@ -659,4 +662,3 @@ waiver:
     invalid_expires: "非法的过期日期 %q（应为 YYYY-MM-DD）"
     expired: "豁免已于 %s 过期"
     permanent: "永久豁免（未设置过期时间）"
-

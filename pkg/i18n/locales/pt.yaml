@@ -41,18 +41,20 @@ policy:
 
 # Comando policy update
 policy_update:
-  short: "Baixar/atualizar biblioteca de políticas do repositório"
+  short: "Baixar/atualizar biblioteca de políticas"
   long: |
-    Baixar a biblioteca de políticas de um repositório Git.
-    O subdiretório policies/ será baixado e armazenado localmente.
+    Baixar a biblioteca de políticas do espelho de releases no OSS padrão.
+    As políticas baixadas são armazenadas localmente e substituem as políticas embutidas.
+    Se o arquivo de políticas no OSS estiver ausente para uma versão histórica, InfraGuard recorre ao repositório GitHub.
 
-    Formatos de repositório suportados:
+    Use --repo apenas ao baixar de um repositório Git personalizado.
+    Formatos de repositório suportados para --repo:
       - host/caminho (ex., github.com/aliyun/infraguard)
       - URL HTTPS (ex., https://github.com/aliyun/infraguard.git)
       - URL SSH (ex., ssh://git@github.com/aliyun/infraguard.git)
       - Estilo SCP (ex., git@github.com:aliyun/infraguard.git)
-  repo_flag: "URL ou caminho do repositório Git"
-  version_flag: "Branch, tag ou commit do Git para baixar"
+  repo_flag: "URL ou caminho do repositório Git; vazio usa o arquivo de políticas padrão no OSS"
+  version_flag: "Versão de políticas para baixar; latest lê o arquivo de versão no OSS, ou main quando --repo é definido"
   progress: "Atualizando políticas de %s (versão: %s)..."
   success: "Políticas atualizadas com sucesso."
 
@@ -197,7 +199,8 @@ update:
   short: "Atualizar InfraGuard CLI para a versão mais recente"
   long: |
     Atualizar InfraGuard CLI para a versão mais recente ou uma versão específica.
-    Baixa e instala o binário do GitHub Releases.
+    Baixa e instala o binário do espelho de releases no OSS.
+    Se o arquivo no OSS estiver ausente, InfraGuard recorre ao asset correspondente do GitHub Release.
 
     Exemplos:
       infraguard update              # Atualizar para versão mais recente
@@ -229,7 +232,7 @@ update:
     permission_denied: "Permissão negada. Tente executar com sudo ou instalar em um local gravável pelo usuário."
     unsupported_platform: "Plataforma não suportada: %s/%s"
     network_error: "Erro de rede: %v. Por favor, verifique sua conexão com a internet."
-    rate_limit: "Limite de taxa da API do GitHub excedido. Por favor, tente novamente mais tarde."
+    rate_limit: "Limite de taxa do serviço de download excedido. Por favor, tente novamente mais tarde."
 
 # Comando config
 config:

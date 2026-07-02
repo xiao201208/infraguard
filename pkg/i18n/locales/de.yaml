@@ -41,18 +41,20 @@ policy:
 
 # Policy update-Befehl
 policy_update:
-  short: "Richtlinienbibliothek aus Repository herunterladen/aktualisieren"
+  short: "Richtlinienbibliothek herunterladen/aktualisieren"
   long: |
-    Laden Sie die Richtlinienbibliothek aus einem Git-Repository herunter.
-    Das Unterverzeichnis policies/ wird heruntergeladen und lokal gespeichert.
+    Laden Sie die Richtlinienbibliothek vom Standard-OSS-Release-Mirror herunter.
+    Die heruntergeladenen Richtlinien werden lokal gespeichert und überschreiben eingebettete Richtlinien.
+    Wenn das OSS-Richtlinienarchiv fuer eine historische Version fehlt, faellt InfraGuard auf das GitHub-Repository zurueck.
 
-    Unterstützte Repository-Formate:
+    Verwenden Sie --repo nur zum Herunterladen aus einem benutzerdefinierten Git-Repository.
+    Unterstuetzte Repository-Formate fuer --repo:
       - Host/Pfad (z.B. github.com/aliyun/infraguard)
       - HTTPS-URL (z.B. https://github.com/aliyun/infraguard.git)
       - SSH-URL (z.B. ssh://git@github.com/aliyun/infraguard.git)
       - SCP-ähnlich (z.B. git@github.com:aliyun/infraguard.git)
-  repo_flag: "Git-Repository-URL oder -Pfad"
-  version_flag: "Git-Branch, Tag oder Commit zum Herunterladen"
+  repo_flag: "Git-Repository-URL oder -Pfad; leer verwendet das Standard-OSS-Richtlinienarchiv"
+  version_flag: "Herunterzuladende Richtlinienversion; latest liest die OSS-Versionsdatei oder main, wenn --repo gesetzt ist"
   progress: "Aktualisiere Richtlinien von %s (Version: %s)..."
   success: "Richtlinien erfolgreich aktualisiert."
 
@@ -197,7 +199,8 @@ update:
   short: "InfraGuard CLI auf die neueste Version aktualisieren"
   long: |
     InfraGuard CLI auf die neueste Version oder eine spezifische Version aktualisieren.
-    Lädt das Binary von GitHub Releases herunter und installiert es.
+    Lädt das Binary vom OSS-Release-Mirror herunter und installiert es.
+    Wenn das OSS-Archiv fehlt, faellt InfraGuard auf das passende GitHub-Release-Asset zurueck.
 
     Beispiele:
       infraguard update              # Auf neueste Version aktualisieren
@@ -229,7 +232,7 @@ update:
     permission_denied: "Zugriff verweigert. Versuchen Sie, mit sudo auszuführen oder an einem vom Benutzer beschreibbaren Ort zu installieren."
     unsupported_platform: "Nicht unterstützte Plattform: %s/%s"
     network_error: "Netzwerkfehler: %v. Bitte überprüfen Sie Ihre Internetverbindung."
-    rate_limit: "GitHub API-Ratenlimit überschritten. Bitte versuchen Sie es später erneut."
+    rate_limit: "Ratenlimit des Download-Dienstes überschritten. Bitte versuchen Sie es später erneut."
 
 # Config-Befehl
 config:

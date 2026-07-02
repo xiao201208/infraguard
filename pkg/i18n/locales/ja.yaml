@@ -41,18 +41,20 @@ policy:
 
 # policy updateコマンド
 policy_update:
-  short: "リポジトリからポリシーライブラリをダウンロード/更新"
+  short: "ポリシーライブラリをダウンロード/更新"
   long: |
-    Gitリポジトリからポリシーライブラリをダウンロードします。
-    policies/サブディレクトリがダウンロードされ、ローカルに保存されます。
+    デフォルトのOSSリリースミラーからポリシーライブラリをダウンロードします。
+    ダウンロードしたポリシーはローカルに保存され、埋め込みポリシーより優先されます。
+    履歴バージョンのOSSポリシーアーカイブが存在しない場合、InfraGuardはGitHubリポジトリにフォールバックします。
 
-    サポートされているリポジトリ形式:
+    カスタムGitリポジトリからダウンロードする場合のみ --repo を使用してください。
+    --repoでサポートされているリポジトリ形式:
       - host/path（例: github.com/aliyun/infraguard）
       - HTTPS URL（例: https://github.com/aliyun/infraguard.git）
       - SSH URL（例: ssh://git@github.com/aliyun/infraguard.git）
       - SCP形式（例: git@github.com:aliyun/infraguard.git）
-  repo_flag: "GitリポジトリのURLまたはパス"
-  version_flag: "ダウンロードするGitブランチ、タグ、またはコミット"
+  repo_flag: "GitリポジトリのURLまたはパス。空の場合はデフォルトのOSSポリシーアーカイブを使用"
+  version_flag: "ダウンロードするポリシーバージョン。latestはOSSのバージョンファイルを読み取り、--repo指定時はmainになります"
   progress: "%sからポリシーを更新中（バージョン: %s）..."
   success: "ポリシーが正常に更新されました。"
 
@@ -197,7 +199,8 @@ update:
   short: "InfraGuard CLIを最新バージョンに更新"
   long: |
     InfraGuard CLIを最新バージョンまたは特定のバージョンに更新します。
-    GitHub Releasesからバイナリをダウンロードしてインストールします。
+    OSSリリースミラーからバイナリをダウンロードしてインストールします。
+    OSSアーカイブが存在しない場合、対応するGitHub Releaseアセットにフォールバックします。
 
     例:
       infraguard update              # 最新バージョンに更新
@@ -229,7 +232,7 @@ update:
     permission_denied: "アクセスが拒否されました。sudoで実行するか、ユーザーが書き込み可能な場所にインストールしてください。"
     unsupported_platform: "サポートされていないプラットフォーム: %s/%s"
     network_error: "ネットワークエラー: %v。インターネット接続を確認してください。"
-    rate_limit: "GitHub APIレート制限を超えました。後でもう一度お試しください。"
+    rate_limit: "ダウンロードサービスのレート制限を超えました。後でもう一度お試しください。"
 
 # configコマンド
 config:

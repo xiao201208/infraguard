@@ -1,12 +1,16 @@
 package updater
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -16,13 +20,17 @@ import (
 )
 
 const (
-	githubAPIURL     = "https://api.github.com/repos/aliyun/infraguard/releases"
-	downloadTimeout  = 5 * time.Minute
-	progressInterval = 100 * time.Millisecond
-	cliTagPrefix     = "cli/"
+	defaultUpdateBaseURL = "https://ros-public-tools.oss-cn-beijing.aliyuncs.com/github-releases/aliyun/infraguard/"
+	defaultGitHubAPIURL  = "https://api.github.com/repos/aliyun/infraguard/releases"
+	updateBaseURLEnv     = "INFRAGUARD_UPDATE_BASE_URL"
+	githubAPIURLEnv      = "INFRAGUARD_GITHUB_API_URL"
+	downloadTimeout      = 5 * time.Minute
+	progressInterval     = 100 * time.Millisecond
+	cliTagPrefix         = "cli/"
+	maxArchiveEntrySize  = 200 << 20
 )
 
-// Release represents a GitHub release
+// Release represents a published CLI release.
 type Release struct {
 	TagName    string  `json:"tag_name"`
 	Name       string  `json:"name"`
@@ -30,7 +38,7 @@ type Release struct {
 	Assets     []Asset `json:"assets"`
 }
 
-// Asset represents a release asset
+// Asset represents a release asset.
 type Asset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
@@ -40,8 +48,8 @@ type Asset struct {
 // Updater handles CLI updates
 type Updater struct {
 	currentVersion string
-	owner          string
-	repo           string
+	baseURL        string
+	githubAPIURL   string
 	httpClient     *http.Client
 	progressFunc   ProgressFunc
 }
@@ -53,8 +61,8 @@ type ProgressFunc func(downloaded, total int64)
 func New(currentVersion string) *Updater {
 	return &Updater{
 		currentVersion: currentVersion,
-		owner:          "aliyun",
-		repo:           "infraguard",
+		baseURL:        resolveUpdateBaseURL(),
+		githubAPIURL:   resolveGitHubAPIURL(),
 		httpClient: &http.Client{
 			Timeout: downloadTimeout,
 		},
@@ -66,8 +74,48 @@ func (u *Updater) SetProgressFunc(fn ProgressFunc) {
 	u.progressFunc = fn
 }
 
-// GetLatestVersion fetches the latest release version from GitHub
+// GetLatestVersion fetches the latest release version from the OSS version file,
+// falling back to GitHub releases when the OSS version file is not available.
 func (u *Updater) GetLatestVersion() (string, error) {
+	latest, err := u.getLatestVersionFromOSS()
+	if err == nil {
+		return latest, nil
+	}
+	if !isFallbackHTTPError(err) {
+		return "", err
+	}
+	return u.getLatestVersionFromGitHub()
+}
+
+func (u *Updater) getLatestVersionFromOSS() (string, error) {
+	req, err := http.NewRequest("GET", u.baseURL+"version.txt", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "infraguard/"+strings.TrimPrefix(u.currentVersion, "v"))
+
+	resp, err := u.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch latest version: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", httpStatusError{URL: req.URL.String(), StatusCode: resp.StatusCode}
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read latest version: %w", err)
+	}
+	latest := strings.TrimSpace(string(body))
+	if latest == "" {
+		return "", fmt.Errorf("version file is empty")
+	}
+	return strings.TrimPrefix(latest, "v"), nil
+}
+
+func (u *Updater) getLatestVersionFromGitHub() (string, error) {
 	releases, err := u.fetchReleases()
 	if err != nil {
 		return "", err
@@ -86,7 +134,7 @@ func (u *Updater) GetLatestVersion() (string, error) {
 	return "", fmt.Errorf("no stable release found")
 }
 
-// GetSpecificVersion fetches a specific release version from GitHub
+// GetSpecificVersion fetches a specific release version from GitHub.
 func (u *Updater) GetSpecificVersion(targetVersion string) (*Release, error) {
 	releases, err := u.fetchReleases()
 	if err != nil {
@@ -124,15 +172,9 @@ func parseCLITag(tag string) (string, bool) {
 	return "", false
 }
 
-// fetchReleases fetches all releases from GitHub API
+// fetchReleases fetches all releases from GitHub API.
 func (u *Updater) fetchReleases() ([]Release, error) {
-	url := fmt.Sprintf("%s/latest", githubAPIURL)
-	if strings.Contains(githubAPIURL, "repos") {
-		// Get all releases instead of just latest
-		url = githubAPIURL
-	}
-
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", u.githubAPIURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -207,44 +249,42 @@ func DetectPlatform() (goos, goarch string) {
 	return runtime.GOOS, runtime.GOARCH
 }
 
-// GetAssetName generates the expected asset name for the current platform
-// Format: infraguard-vVERSION-OS-ARCH
+// GetAssetName generates the expected raw binary asset name for the current platform.
+// Format: infraguard-vVERSION-OS-ARCH[.exe]
 func GetAssetName(version, goos, goarch string) string {
-	// Ensure version has 'v' prefix
-	if !strings.HasPrefix(version, "v") {
-		version = "v" + version
-	}
+	version = strings.TrimPrefix(version, "v")
+	return fmt.Sprintf("infraguard-v%s-%s-%s%s", version, goos, goarch, platformBinarySuffix(goos))
+}
 
-	return fmt.Sprintf("infraguard-%s-%s-%s", version, goos, goarch)
+func legacyRawAssetName(version, goos, goarch string) string {
+	version = strings.TrimPrefix(version, "v")
+	return fmt.Sprintf("infraguard-%s-%s-%s%s", version, goos, goarch, platformBinarySuffix(goos))
+}
+
+func archiveAssetName(version, goos, goarch string) string {
+	version = strings.TrimPrefix(version, "v")
+	return fmt.Sprintf("infraguard-v%s-%s-%s.tar.gz", version, goos, goarch)
+}
+
+func legacyArchiveAssetName(version, goos, goarch string) string {
+	version = strings.TrimPrefix(version, "v")
+	return fmt.Sprintf("infraguard-%s-%s-%s.tar.gz", version, goos, goarch)
+}
+
+func platformBinarySuffix(goos string) string {
+	if goos == "windows" {
+		return ".exe"
+	}
+	return ""
 }
 
 // DownloadAndInstall downloads the binary and installs it
 func (u *Updater) DownloadAndInstall(targetVersion string) error {
-	// Get the specific release
-	release, err := u.GetSpecificVersion(targetVersion)
-	if err != nil {
-		return err
-	}
-
 	// Detect platform
 	goos, goarch := DetectPlatform()
-	assetName := GetAssetName(targetVersion, goos, goarch)
-
-	// Find the matching asset
-	var asset *Asset
-	for i := range release.Assets {
-		if release.Assets[i].Name == assetName {
-			asset = &release.Assets[i]
-			break
-		}
-	}
-
-	if asset == nil {
-		return fmt.Errorf("no binary found for %s/%s (expected: %s)", goos, goarch, assetName)
-	}
 
 	// Download the binary
-	tmpFile, err := u.downloadAsset(asset)
+	tmpFile, err := u.downloadUpdateAsset(targetVersion, goos, goarch)
 	if err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
@@ -258,7 +298,90 @@ func (u *Updater) DownloadAndInstall(targetVersion string) error {
 	return nil
 }
 
-// downloadAsset downloads an asset to a temporary file
+func (u *Updater) downloadUpdateAsset(targetVersion, goos, goarch string) (string, error) {
+	version := strings.TrimPrefix(targetVersion, "v")
+	var ossErr error
+	for _, assetName := range ossAssetNameCandidates(version, goos, goarch) {
+		asset := &Asset{
+			Name:               assetName,
+			BrowserDownloadURL: fmt.Sprintf("%s%s/%s", u.baseURL, version, assetName),
+		}
+
+		tmpFile, err := u.downloadAsset(asset)
+		if err == nil {
+			return tmpFile, nil
+		}
+		if !isFallbackHTTPError(err) {
+			return "", err
+		}
+		if ossErr == nil {
+			ossErr = err
+		}
+	}
+
+	tmpFile, githubErr := u.downloadGitHubAsset(version, goos, goarch)
+	if githubErr != nil {
+		return "", fmt.Errorf("OSS download failed: %v; GitHub fallback failed: %w", ossErr, githubErr)
+	}
+	return tmpFile, nil
+}
+
+func (u *Updater) downloadGitHubAsset(targetVersion, goos, goarch string) (string, error) {
+	release, err := u.GetSpecificVersion(targetVersion)
+	if err != nil {
+		return "", err
+	}
+
+	expectedNames := githubAssetNameCandidates(targetVersion, goos, goarch)
+	for _, expectedName := range expectedNames {
+		for i := range release.Assets {
+			if release.Assets[i].Name == expectedName {
+				return u.downloadAsset(&release.Assets[i])
+			}
+		}
+	}
+	return "", fmt.Errorf("no binary found for %s/%s (expected one of: %s)", goos, goarch, strings.Join(expectedNames, ", "))
+}
+
+func githubAssetNameCandidates(version, goos, goarch string) []string {
+	cleanVersion := strings.TrimPrefix(version, "v")
+
+	candidates := []string{
+		GetAssetName(cleanVersion, goos, goarch),
+		legacyRawAssetName(cleanVersion, goos, goarch),
+		archiveAssetName(cleanVersion, goos, goarch),
+		legacyArchiveAssetName(cleanVersion, goos, goarch),
+	}
+
+	return uniqueAssetNameCandidates(candidates)
+}
+
+func ossAssetNameCandidates(version, goos, goarch string) []string {
+	candidates := []string{
+		GetAssetName(version, goos, goarch),
+		legacyRawAssetName(version, goos, goarch),
+		archiveAssetName(version, goos, goarch),
+		legacyArchiveAssetName(version, goos, goarch),
+	}
+
+	return uniqueAssetNameCandidates(candidates)
+}
+
+func uniqueAssetNameCandidates(candidates []string) []string {
+	seen := make(map[string]struct{}, len(candidates))
+	unique := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		unique = append(unique, candidate)
+	}
+	return unique
+}
+
+// downloadAsset downloads an asset to a temporary executable. tar.gz assets are
+// extracted, while historical GitHub assets are raw binaries.
 func (u *Updater) downloadAsset(asset *Asset) (string, error) {
 	req, err := http.NewRequest("GET", asset.BrowserDownloadURL, nil)
 	if err != nil {
@@ -272,25 +395,63 @@ func (u *Updater) downloadAsset(asset *Asset) (string, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed with status %d", resp.StatusCode)
+		return "", httpStatusError{URL: req.URL.String(), StatusCode: resp.StatusCode}
 	}
 
-	// Create temporary file (binary, not archive)
+	if strings.HasSuffix(asset.Name, ".tar.gz") {
+		return u.downloadArchiveAsset(resp, asset)
+	}
+	return u.downloadRawAsset(resp, asset)
+}
+
+func (u *Updater) downloadArchiveAsset(resp *http.Response, asset *Asset) (string, error) {
+	archiveFile, err := os.CreateTemp("", "infraguard-update-*.tar.gz")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(archiveFile.Name())
+
+	// Download with progress tracking
+	var downloaded int64
+	totalSize := asset.Size
+	if totalSize <= 0 {
+		totalSize = resp.ContentLength
+	}
+
+	reader := io.TeeReader(resp.Body, &progressWriter{
+		total:    totalSize,
+		current:  &downloaded,
+		callback: u.progressFunc,
+	})
+
+	if _, err := io.Copy(archiveFile, reader); err != nil {
+		archiveFile.Close()
+		return "", err
+	}
+	if err := archiveFile.Close(); err != nil {
+		return "", err
+	}
+
+	return extractBinaryFromArchive(archiveFile.Name())
+}
+
+func (u *Updater) downloadRawAsset(resp *http.Response, asset *Asset) (string, error) {
 	tmpFile, err := os.CreateTemp("", "infraguard-update-*")
 	if err != nil {
 		return "", err
 	}
 	defer tmpFile.Close()
 
-	// Set executable permissions on the temporary file
 	if err := os.Chmod(tmpFile.Name(), 0755); err != nil {
 		os.Remove(tmpFile.Name())
 		return "", fmt.Errorf("failed to set executable permissions: %w", err)
 	}
 
-	// Download with progress tracking
 	var downloaded int64
 	totalSize := asset.Size
+	if totalSize <= 0 {
+		totalSize = resp.ContentLength
+	}
 
 	reader := io.TeeReader(resp.Body, &progressWriter{
 		total:    totalSize,
@@ -302,8 +463,109 @@ func (u *Updater) downloadAsset(asset *Asset) (string, error) {
 		os.Remove(tmpFile.Name())
 		return "", err
 	}
-
 	return tmpFile.Name(), nil
+}
+
+func extractBinaryFromArchive(archivePath string) (string, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return "", err
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			continue
+		}
+		if !isInfraGuardBinaryEntry(hdr.Name) {
+			continue
+		}
+		if hdr.Size < 0 || hdr.Size > maxArchiveEntrySize {
+			return "", fmt.Errorf("archive entry %s exceeds maximum size", hdr.Name)
+		}
+
+		tmpFile, err := os.CreateTemp("", "infraguard-update-*")
+		if err != nil {
+			return "", err
+		}
+		written, copyErr := io.Copy(tmpFile, io.LimitReader(tr, maxArchiveEntrySize+1))
+		closeErr := tmpFile.Close()
+		if copyErr != nil {
+			os.Remove(tmpFile.Name())
+			return "", copyErr
+		}
+		if closeErr != nil {
+			os.Remove(tmpFile.Name())
+			return "", closeErr
+		}
+		if written > maxArchiveEntrySize {
+			os.Remove(tmpFile.Name())
+			return "", fmt.Errorf("archive entry %s exceeds maximum size", hdr.Name)
+		}
+		if err := os.Chmod(tmpFile.Name(), 0755); err != nil {
+			os.Remove(tmpFile.Name())
+			return "", fmt.Errorf("failed to set executable permissions: %w", err)
+		}
+		return tmpFile.Name(), nil
+	}
+
+	return "", fmt.Errorf("infraguard binary not found in archive")
+}
+
+func isInfraGuardBinaryEntry(name string) bool {
+	name = strings.ReplaceAll(name, "\\", "/")
+	base := path.Base(path.Clean(name))
+	return base == "infraguard" || base == "infraguard.exe"
+}
+
+func resolveUpdateBaseURL() string {
+	baseURL := strings.TrimSpace(os.Getenv(updateBaseURLEnv))
+	if baseURL == "" {
+		baseURL = defaultUpdateBaseURL
+	}
+	if !strings.HasSuffix(baseURL, "/") {
+		baseURL += "/"
+	}
+	return baseURL
+}
+
+func resolveGitHubAPIURL() string {
+	apiURL := strings.TrimSpace(os.Getenv(githubAPIURLEnv))
+	if apiURL == "" {
+		return defaultGitHubAPIURL
+	}
+	return apiURL
+}
+
+type httpStatusError struct {
+	URL        string
+	StatusCode int
+}
+
+func (e httpStatusError) Error() string {
+	return fmt.Sprintf("%s returned status %d", e.URL, e.StatusCode)
+}
+
+func isFallbackHTTPError(err error) bool {
+	var statusErr httpStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.StatusCode == http.StatusNotFound || statusErr.StatusCode == http.StatusForbidden
 }
 
 // progressWriter wraps io.Writer to track progress

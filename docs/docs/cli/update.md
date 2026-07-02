@@ -5,6 +5,8 @@ title: infraguard update
 # infraguard update
 
 Update InfraGuard CLI to the latest version or a specific version.
+The command reads the latest version from the OSS release mirror and downloads the matching platform binary.
+If the OSS binary is missing, InfraGuard falls back to the matching GitHub Release asset for compatibility with historical releases.
 
 ## Synopsis
 
@@ -63,6 +65,14 @@ Install a specific version:
 ```bash
 infraguard update --version 0.5.0
 ```
+
+This downloads:
+
+```text
+https://ros-public-tools.oss-cn-beijing.aliyuncs.com/github-releases/aliyun/infraguard/0.5.0/infraguard-v0.5.0-<os>-<arch>
+```
+
+If that OSS object does not exist, InfraGuard tries compatible legacy OSS names, then searches the GitHub Release for the same version and accepts historical raw binary asset names such as `infraguard-v0.5.0-linux-amd64`.
 
 ### Force Reinstall Current Version
 

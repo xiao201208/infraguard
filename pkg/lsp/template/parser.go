@@ -80,12 +80,12 @@ func ParseJSON(content string) *ParsedTemplate {
 // It first tries jsonrepair directly, then sanitizes lines with unclosed
 // strings (common during editing) before retrying.
 func tryRepairJSON(content string, root *map[string]interface{}) bool {
-	repaired, err := jsonrepair.Repair(content)
+	repaired, err := jsonrepair.JSONRepair(content)
 	if err == nil && json.Unmarshal([]byte(repaired), root) == nil {
 		return true
 	}
 	sanitized := sanitizeJSONForRepair(content)
-	repaired, err = jsonrepair.Repair(sanitized)
+	repaired, err = jsonrepair.JSONRepair(sanitized)
 	if err == nil && json.Unmarshal([]byte(repaired), root) == nil {
 		return true
 	}
